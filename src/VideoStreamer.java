@@ -266,4 +266,6 @@ public class VideoStreamer {
         return currentBitrate;
     }
 
+    public Vector<Client> getClients() { return clients; }
+
 }
