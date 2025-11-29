@@ -19,9 +19,9 @@ public class ExpertSystem {
     float percentageX = 0.25F; // Rule 9, 1, 2, 7
     int changesX = 5; // Rule 4
     int consecutiveIntervalsY = 5; // Rule 2
-    int secondsX = 3; // Rule 5
-    int secondsY = 3; // Rule 6
-    int minutesY = 3; // Rule 8, 10
+    int secondsX = 3; // Rule 5 // in seconds
+    int secondsY = 3; // Rule 6 // in seconds
+    int minutesY = 3; // Rule 8, 10 // in minutes
 
 
     // Bitrate Config
@@ -96,8 +96,9 @@ public class ExpertSystem {
         for(Client client : clients) {
             if(client.bufferDuration > 0) {
                 buffering++;
-                totalBufferLength += client.bufferDuration;
             }
+
+            totalBufferLength += client.bufferDuration;
         }
 
         // If no clients are buffering, return false
@@ -107,7 +108,7 @@ public class ExpertSystem {
 
         // Calculate percent of clients buffering and the average buffer length
         float currBufferPercent = (float) buffering / clients.size();
-        int avgBufferLength = totalBufferLength / buffering;
+        int avgBufferLength = totalBufferLength / clients.size();
 
         // If either increased compared to lastBufferPercent and lastBufferLength, return true (loop will revert)
         if(avgBufferLength > lastBufferLength || currBufferPercent > lastBufferPercent) {
@@ -131,9 +132,12 @@ public class ExpertSystem {
             // Check front of queue to see if it's too old, if it is then remove it and repeat
             // If it's not, then everything after it is younger and fine
         while(true) {
-            assert bitrateChanges.peek() != null;
+            // check that queue is not empty
+            if(bitrateChanges.peek() == null) {
+                break;
+            }
 
-            if (!(bitrateChanges.peek().timestamp > 60)) {
+            if (!((System.currentTimeMillis() - bitrateChanges.peek().timestamp) > timeWindow)) {
                 break;
             }
 
@@ -229,31 +233,25 @@ public class ExpertSystem {
         // Get clients
         Vector<Client> clients = streamer.getClients();
 
-        // Get number of clients buffering and total buffer length
-        int buffering = 0;
+        // Get total buffer length
         int totalBufferLength = 0;
         for(Client client : clients) {
-            if(client.bufferDuration > 0) {
-                buffering++;
-                totalBufferLength += client.bufferDuration;
-            }
-        }
-
-        // If no clients are buffering, return false
-        if(buffering == 0) {
-            return false;
+            totalBufferLength += client.bufferDuration;
         }
 
         // Calculate average buffer length
-        int avgBufferLength = totalBufferLength / buffering;
+        int avgBufferLength = totalBufferLength / clients.size();
 
         // Store avgBufferLength in bufferLength[0], regardless if true or not
         if(bufferLength[0] != -1) {
             bufferLength[0] = avgBufferLength;
         }
 
+        // convert from sec to ms
+        long ms = (long) secondsX * 60;
+
         // if < X seconds, decrease bitrate (return true)
-        if(avgBufferLength < secondsX) {
+        if(avgBufferLength < ms) {
             return true;
         }
 
@@ -264,31 +262,25 @@ public class ExpertSystem {
         // Get clients
         Vector<Client> clients = streamer.getClients();
 
-        // Get number of clients buffering and total buffer length
-        int buffering = 0;
+        // Get total buffer length
         int totalBufferLength = 0;
         for(Client client : clients) {
-            if(client.bufferDuration > 0) {
-                buffering++;
-                totalBufferLength += client.bufferDuration;
-            }
-        }
-
-        // If no clients are buffering, return false
-        if(buffering == 0) {
-            return false;
+            totalBufferLength += client.bufferDuration;
         }
 
         // Calculate average buffer length
-        int avgBufferLength = totalBufferLength / buffering;
+        int avgBufferLength = totalBufferLength / clients.size();
 
         // Store avgBufferLength in bufferLength[0], regardless if true or not
         if(bufferLength[0] != -1) {
             bufferLength[0] = avgBufferLength;
         }
 
+        // convert from sec to ms
+        long ms = (long) secondsY * 60;
+
         // if < X seconds, decrease bitrate (return true)
-        if(avgBufferLength > secondsY) {
+        if(avgBufferLength > ms) {
             return true;
         }
 
@@ -333,8 +325,11 @@ public class ExpertSystem {
             }
         }
 
+        // convert from minutes to ms
+        long ms = (long) minutesY * 60 * 1000;
+
         // Check if currentTime - lastBuffer > Y minutes
-        if((System.currentTimeMillis() - lastBuffer) > minutesY) {
+        if((System.currentTimeMillis() - lastBuffer) > ms) {
             // If it is, set current bitrate as baseline (baselineBitrate)
             this.baselineBitrate = bitrate;
         }
@@ -352,8 +347,11 @@ public class ExpertSystem {
             }
         }
 
+        // convert from minutes to ms
+        long ms = (long) minutesY * 60 * 1000;
+
         // Check if currentTime - lastBuffer > Y minutes
-        if((System.currentTimeMillis() - lastBuffer) > minutesY) {
+        if((System.currentTimeMillis() - lastBuffer) > ms) {
             // If true, log session as "stable"
             System.out.println("STABLE SESSION");
         }
