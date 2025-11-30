@@ -9,5 +9,7 @@
     <orderEntry type="sourceFolder" forTests="false" />
     <orderEntry type="library" name="jcodec" level="project" />
     <orderEntry type="library" name="jcodec.javase" level="project" />
+    <orderEntry type="library" name="jcodec1" level="project" />
+    <orderEntry type="library" name="jcodec.javase1" level="project" />
   </component>
 </module>

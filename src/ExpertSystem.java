@@ -406,6 +406,12 @@ public class ExpertSystem {
             // Bitrate Stability Diagnostics
             RuleSetBaselineBitrate();
             RuleLogStableSession();
+
+            // After all rules run, reset isUpdated for the next iteration
+            Vector<Client> clients = streamer.getClients();
+            for (Client client : clients) {
+                client.resetUpdatedFlag();   // or client.isUpdated = false;
+            }
         }
     }
 
