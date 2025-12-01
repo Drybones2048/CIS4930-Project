@@ -1,424 +1,353 @@
 package src;
-import java.util.Iterator;
-import java.util.Queue;
+
 import java.util.LinkedList;
+import java.util.Queue;
 import java.util.Vector;
 
 class BitrateChange {
     int bitrate;
     long timestamp;
-    BitrateChange(int bitrate, long timestamp)
-    { this.bitrate = bitrate; this.timestamp = timestamp; }
+    BitrateChange(int b, long t) {
+        bitrate = b;
+        timestamp = t;
+    }
 }
 
+/**
+ * ExpertSystem runs a periodic inference step over all clients
+ * and adjusts the global bitrate based on rule-based logic.
+ */
 public class ExpertSystem {
-    private VideoStreamer streamer;
-    private String compressionSettings = "medium";
 
-    // Custom variables
-    float percentageX = 0.25F; // Rule 9, 1, 2, 7
-    int changesX = 5; // Rule 4
-    int consecutiveIntervalsY = 5; // Rule 2
-    int secondsX = 3; // Rule 5 // in seconds
-    int secondsY = 3; // Rule 6 // in seconds
-    int minutesY = 3; // Rule 8, 10 // in minutes
+    private final VideoStreamer streamer;
 
-
-    // Bitrate Config
     private int bitrate;
-    private int maxBitrate;
-    private int minBitrate;
-    private int bitrateIncrement;
+    private final int minBitrate;
+    private final int maxBitrate;
+    private final int increment;
+    private final int iterationMs;
 
-    // Streamer settings
-    private int baselineBitrate;
-    private int previousBitrate;
-
-    // Rule variables
-    private long lastBuffer = System.currentTimeMillis(); // Rule 8
-    private int consecutiveBufferFree = 0; // Rule 2
-    Queue<BitrateChange> bitrateChanges = new LinkedList<>();
-
-    // Inference Engine
-    private boolean isRunning = false;
+    private volatile boolean running = false;
     private Thread loopThread;
-    int iterationLength; // milliseconds between loops
 
-    // Constructor
-    public ExpertSystem(VideoStreamer streamer, int bitrate, int minBitrate, int maxBitrate, int bitrateIncrement, int iterationLength) {
+    // For controlling oscillation
+    private final Queue<BitrateChange> history = new LinkedList<>();
+    private long lastChange = 0;
+
+    // Streak tracking
+    private int healthyStreak = 0;
+    private int noBufferingStreak = 0;
+
+    // Grace period for new clients
+    private final int graceCycles = 5;
+
+    public ExpertSystem(
+            VideoStreamer streamer,
+            int initialBitrate,
+            int min,
+            int max,
+            int inc,
+            int iter
+    ) {
         this.streamer = streamer;
-        this.bitrate = bitrate;
-        this.minBitrate = minBitrate;
-        this.maxBitrate = maxBitrate;
-        this.bitrateIncrement = bitrateIncrement;
-        this.iterationLength = iterationLength; // how many ms it should wait before re-running engine
+        this.bitrate = initialBitrate;
+        this.minBitrate = min;
+        this.maxBitrate = max;
+        this.increment = inc;
+        this.iterationMs = iter;
     }
 
-
-    // Bitrate Change Diagnostics
-    private void RuleStreamIssue() { // Rule 9
-        // Get clients
-        Vector<Client> clients = streamer.getClients();
-
-        int buffering = 0;
-
-        // Find out how many clients are buffering
-        for(Client client : clients) {
-            if(client.bufferDuration > 0) {
-                buffering++;
-            }
-        }
-
-        // If min level bitrate and buffering still persists, pause stream and alert of technical issues
-        if(bitrate == minBitrate && buffering >= (clients.size() * percentageX)) {
-            // pause stream
-
-            // print alert of technical issues
-            System.out.println("ALERT: Stream was paused.");
-        }
-    }
-
-    private boolean RuleRevertBitrate(int lastChange, float lastBufferPercent, int lastBufferLength) { // Rule 3
-        // takes in lastChange, which is either -1, 0, +1
-        // representing -1 increment, +1, etc.
-
-        // Check whether bitrate was changed
-        if(lastChange == 0) {
-            return false;
-        }
-
-        // Get clients
-        Vector<Client> clients = streamer.getClients();
-
-        // Get number of clients buffering and total buffer length
-        int buffering = 0;
-        int totalBufferLength = 0;
-        for(Client client : clients) {
-            if(client.bufferDuration > 0) {
-                buffering++;
-            }
-
-            totalBufferLength += client.bufferDuration;
-        }
-
-        // If no clients are buffering, return false
-        if(buffering == 0) {
-            return false;
-        }
-
-        // Calculate percent of clients buffering and the average buffer length
-        float currBufferPercent = (float) buffering / clients.size();
-        int avgBufferLength = totalBufferLength / clients.size();
-
-        // If either increased compared to lastBufferPercent and lastBufferLength, return true (loop will revert)
-        if(avgBufferLength > lastBufferLength || currBufferPercent > lastBufferPercent) {
-            return true;
-        }
-
-        return false;
-    }
-
-    private boolean RuleSteadyBitrate() { // Rule 4
-        // The queue used for this is bitrateChanges
-        // .poll() pops front, .peek() returns front, .size() gives size
-        // The queue stores bitrateChanges (see top of file), which has two items:
-            // .bitrate = the bitrate in kbps (or whatever unit everywhere else uses)
-            // .timestamp = millisecond system clock timestamp (same format returned by System.currentTimeMillis())
-
-        // Define time window (i.e., 1 min rolling count of bitrate changes)
-        int timeWindow = 60; // 60 sec
-
-        // If timestamp is outside timeWindow, remove from queue
-            // Check front of queue to see if it's too old, if it is then remove it and repeat
-            // If it's not, then everything after it is younger and fine
-        while(true) {
-            // check that queue is not empty
-            if(bitrateChanges.peek() == null) {
-                break;
-            }
-
-            if (!((System.currentTimeMillis() - bitrateChanges.peek().timestamp) > timeWindow)) {
-                break;
-            }
-
-            bitrateChanges.poll();
-        }
-
-        // If more than X items in queue (q.size()), bitrate is changing too rapidly so set it baseline (baselineBitrate)
-        if(bitrateChanges.size() > changesX) {
-            // If baselineBitrate exists, set bitrate to that
-            if(baselineBitrate != 0) {
-                this.bitrate = baselineBitrate;
-            } else { // Otherwise, set bitrate to smallest bitrate in queue
-                Iterator<BitrateChange> it = bitrateChanges.iterator();
-                int smallestBitrate = bitrateChanges.peek().bitrate;
-
-                // Loop through queue to get smallestBitrate
-                while(it.hasNext()) {
-                    BitrateChange change = it.next();
-
-                    if(change.bitrate < smallestBitrate) {
-                        smallestBitrate = change.bitrate;
-                    }
-                }
-
-                this.bitrate = smallestBitrate;
-            }
-
-            return true;
-        }
-
-        return false;
-    }
-
-
-    // Bitrate Adjustments
-    private boolean RulePercentBufferingDecrease(float[] bufferPercent) { // Rule 1
-        Vector<Client> clients = streamer.getClients();
-
-        // Loop through clients
-        int buffering = 0;
-        for(Client client : clients) {
-            if(client.bufferDuration > 0) {
-                buffering++;
-            }
-        }
-
-        // Store % in bufferPercent[0], regardless if true or not
-        float percent = (float) buffering / clients.size();
-        if(bufferPercent[0] != -1) {
-            bufferPercent[0] = percent;
-        }
-
-        // If >=X% of them are currently buffering, decrease bitrate (return true)
-        if(percent >= percentageX) {
-            return true;
-        }
-
-        return false;
-    }
-
-    private boolean RulePercentBufferingIncrease(float[] bufferPercent) { // Rule 2
-        Vector<Client> clients = streamer.getClients();
-
-        // Loop through clients
-        int buffering = 0;
-        for(Client client : clients) {
-            if(client.bufferDuration > 0) {
-                buffering++;
-            }
-        }
-
-        // Store % in bufferPercent[0], regardless if true or not
-        float percent = (float) buffering / clients.size();
-        if(bufferPercent[0] != -1) {
-            bufferPercent[0] = percent;
-        }
-
-        // If <X% of them are currently buffering, increase bitrate (return true)
-        if(percent < percentageX) {
-            // Increase consecutiveBufferFree by 1
-            consecutiveBufferFree++;
-
-            // If this happens for Y consecutive intervals, increase bitrate
-            if(consecutiveBufferFree > consecutiveIntervalsY) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private boolean RuleBufferLengthDecrease(int[] bufferLength) { // Rule 5
-        // Get clients
-        Vector<Client> clients = streamer.getClients();
-
-        // Get total buffer length
-        int totalBufferLength = 0;
-        for(Client client : clients) {
-            totalBufferLength += client.bufferDuration;
-        }
-
-        // Calculate average buffer length
-        int avgBufferLength = totalBufferLength / clients.size();
-
-        // Store avgBufferLength in bufferLength[0], regardless if true or not
-        if(bufferLength[0] != -1) {
-            bufferLength[0] = avgBufferLength;
-        }
-
-        // convert from sec to ms
-        long ms = (long) secondsX * 60;
-
-        // if < X seconds, decrease bitrate (return true)
-        if(avgBufferLength < ms) {
-            return true;
-        }
-
-        return false;
-    }
-
-    private boolean RuleBufferLengthIncrease(int[] bufferLength) { // Rule 6
-        // Get clients
-        Vector<Client> clients = streamer.getClients();
-
-        // Get total buffer length
-        int totalBufferLength = 0;
-        for(Client client : clients) {
-            totalBufferLength += client.bufferDuration;
-        }
-
-        // Calculate average buffer length
-        int avgBufferLength = totalBufferLength / clients.size();
-
-        // Store avgBufferLength in bufferLength[0], regardless if true or not
-        if(bufferLength[0] != -1) {
-            bufferLength[0] = avgBufferLength;
-        }
-
-        // convert from sec to ms
-        long ms = (long) secondsY * 60;
-
-        // if < X seconds, decrease bitrate (return true)
-        if(avgBufferLength > ms) {
-            return true;
-        }
-
-        return false;
-    }
-
-    private boolean RuleNetworkCongestionDecrease() { // Rule 7
-        // Get clients
-        Vector<Client> clients = streamer.getClients();
-
-        // Get number of clients missing feedback
-        int missingFeedback = 0;
-        for(Client client : clients) {
-            if(client.isUpdated == false) {
-                missingFeedback++;
-            }
-        }
-
-        // Calculate percentage of clients missing feedback
-        float missingPercentage = missingFeedback / clients.size();
-
-        // If more than X% are read as false (unupdated),
-        // Then reduce bitrate bc of possible congestion
-        if(missingPercentage > percentageX) {
-            return true;
-        }
-
-        return false;
-    }
-
-
-    // Current Bitrate Stability Diagnostics
-    private void RuleSetBaselineBitrate() { // Rule 8
-        // Get clients
-        Vector<Client> clients = streamer.getClients();
-
-        // See if any client is buffering
-        for(Client client : clients) {
-            // If anyone is buffering, set lastBuffer timestamp to now (global var)
-            if(client.bufferDuration > 0) {
-                this.lastBuffer = System.currentTimeMillis();
-            }
-        }
-
-        // convert from minutes to ms
-        long ms = (long) minutesY * 60 * 1000;
-
-        // Check if currentTime - lastBuffer > Y minutes
-        if((System.currentTimeMillis() - lastBuffer) > ms) {
-            // If it is, set current bitrate as baseline (baselineBitrate)
-            this.baselineBitrate = bitrate;
-        }
-    }
-
-    private void RuleLogStableSession() { // Rule 10
-        // Get clients
-        Vector<Client> clients = streamer.getClients();
-
-        // See if any client is buffering
-        for(Client client : clients) {
-            // If anyone is buffering, set lastBuffer timestamp to now (global var)
-            if(client.bufferDuration > 0) {
-                this.lastBuffer = System.currentTimeMillis();
-            }
-        }
-
-        // convert from minutes to ms
-        long ms = (long) minutesY * 60 * 1000;
-
-        // Check if currentTime - lastBuffer > Y minutes
-        if((System.currentTimeMillis() - lastBuffer) > ms) {
-            // If true, log session as "stable"
-            System.out.println("STABLE SESSION");
-        }
-    }
-
-    // Inference Engine Loop
     public void Start() {
-        if (loopThread != null && loopThread.isAlive()) return;
+        if (running) return;
+        running = true;
 
-        isRunning = true;
-        loopThread = new Thread(this::InferenceEngine);
+        loopThread = new Thread(this::loop, "ExpertSystemLoop");
+        loopThread.setDaemon(false);
         loopThread.start();
     }
 
-    private void InferenceEngine() {
-        // Loop variables
-        int bitrateChange = 0; // either +1, 0, -1 for increments
-        int lastChange;
-        float[] lastBufferPercent = {-1};
-        int[] lastBufferLength = {-1};
+    public void End() {
+        running = false;
+        try {
+            if (loopThread != null) loopThread.join();
+        } catch (InterruptedException ignored) {}
+    }
 
-        // Main loop
-        while (isRunning) {
-            // Apply bitrateChange
-            if (bitrateChange != 0) {
-                bitrate = bitrate + bitrateChange * bitrateIncrement;
-                if (bitrate > maxBitrate) bitrate = maxBitrate;
-                if (bitrate < minBitrate) bitrate = minBitrate;
-                bitrateChanges.add(new BitrateChange(bitrate, System.currentTimeMillis()));
+    private void loop() {
+        while (running) {
 
-                streamer.setBitrateAndCompression(bitrate, compressionSettings);
+            long start = System.currentTimeMillis();
+            try {
+                runOnce();
+            } catch (Exception e) {
+                System.err.println("[EXPERT] Error: " + e.getMessage());
             }
-            lastChange = bitrateChange;
-            bitrateChange = 0;
 
-            // Wait between iterations to prevent jittery changes
-            try { Thread.sleep(iterationLength); } catch (InterruptedException ignored) {}
-
-            // Bitrate Change Diagnostics
-            RuleStreamIssue();
-            if (RuleRevertBitrate(lastChange, lastBufferPercent[0], lastBufferLength[0]))
-                { bitrateChange = -lastChange; continue; }
-            RuleSteadyBitrate();
-
-            // Bitrate Adjustments
-            if (RulePercentBufferingDecrease(lastBufferPercent)) { bitrateChange--; continue; }
-            if (RulePercentBufferingIncrease(lastBufferPercent)) { bitrateChange++; continue; }
-            if (RuleBufferLengthDecrease(lastBufferLength)) { bitrateChange--; continue; }
-            if (RuleBufferLengthIncrease(lastBufferLength)) { bitrateChange++; continue; }
-            if (RuleNetworkCongestionDecrease()) { bitrateChange--; continue; }
-
-            // Bitrate Stability Diagnostics
-            RuleSetBaselineBitrate();
-            RuleLogStableSession();
-
-            // After all rules run, reset isUpdated for the next iteration
-            Vector<Client> clients = streamer.getClients();
-            for (Client client : clients) {
-                client.resetUpdatedFlag();   // or client.isUpdated = false;
+            long elapsed = System.currentTimeMillis() - start;
+            long sleep = iterationMs - elapsed;
+            if (sleep > 0) {
+                try { Thread.sleep(sleep); } catch (InterruptedException ignored) {}
             }
         }
     }
 
-    public void End() {
-        isRunning = false;
-        try {
-            if (loopThread != null) loopThread.join();
-        } catch (InterruptedException ignored) {}
+    // ----------------------------------------------------------------------
+    // One inference step
+    // ----------------------------------------------------------------------
+    private void runOnce() {
+
+        Vector<Client> clients = new Vector<>(streamer.getClients());
+        if (clients.isEmpty()) {
+            return;
+        }
+
+        int total = clients.size();
+        int activeCount = 0;
+        int bufferingCount = 0;
+        int missingCount = 0;
+
+        int sumCache = 0;
+
+        for (Client c : clients) {
+
+            if (c.inGracePeriod(graceCycles, iterationMs)) {
+                continue;
+            }
+
+            activeCount++;
+
+            if (!recent(c)) {
+                missingCount++;
+            }
+
+            if (c.isBuffering()) {
+                bufferingCount++;
+            }
+
+            sumCache += c.getCachePercent();
+        }
+
+        if (activeCount == 0) return;
+
+        int avgCache = sumCache / activeCount;
+        int percentBuffering = (int)((bufferingCount * 100.0) / activeCount);
+        int percentMissing = (int)((missingCount * 100.0) / activeCount);
+
+        boolean changed = false;
+
+        // ============================================================
+        // Rule 1: If >X% buffering, decrease bitrate
+        // ============================================================
+        if (Rule1_BufferingTooHigh(percentBuffering)) {
+            changed = true;
+        }
+
+        // ============================================================
+        // Rule 2: If <X% buffering for Y cycles, increase bitrate
+        // ============================================================
+        if (!changed && Rule2_BufferingLow(percentBuffering)) {
+            changed = true;
+        }
+
+        // ============================================================
+        // Rule 3: If buffering spike after increase, revert bitrate
+        // ============================================================
+        if (!changed && Rule3_RevertIfSpike(percentBuffering)) {
+            changed = true;
+        }
+
+        // ============================================================
+        // Rule 4: If too many bitrate adjustments recently, freeze
+        // ============================================================
+        if (!changed && Rule4_TooManyChanges()) {
+            changed = true;
+        }
+
+        // ============================================================
+        // Rule 5: If average cache low (proxy for buffer length low), decrease
+        // ============================================================
+        if (!changed && Rule5_CacheLow(avgCache)) {
+            changed = true;
+        }
+
+        // ============================================================
+        // Rule 6: If average cache high, increase or maintain
+        // ============================================================
+        if (!changed && Rule6_CacheHigh(avgCache)) {
+            changed = true;
+        }
+
+        // ============================================================
+        // Rule 7: If missing telemetry from X% of clients, precaution decrease
+        // ============================================================
+        if (!changed && Rule7_MissingTelemetry(percentMissing)) {
+            changed = true;
+        }
+
+        // ============================================================
+        // Rule 8: If no buffering for Y minutes, mark baseline
+        // ============================================================
+        if (!changed) {
+            Rule8_RecordBaseline(percentBuffering);
+        }
+
+        // ============================================================
+        // Rule 9: If at minimum bitrate and still buffering, alert
+        // ============================================================
+        if (!changed) {
+            Rule9_MinBitrateStillBuffering(percentBuffering);
+        }
+
+        // ============================================================
+        // Rule 10: If stable for Y minutes, log session stable
+        // ============================================================
+        if (!changed) {
+            Rule10_StableSession(percentBuffering);
+        }
+
+        System.out.println();
+        Main.printClientStats(streamer.getClients());
+    }
+
+    private boolean recent(Client c) {
+        return System.currentTimeMillis() - c.getLastUpdateMs() < 15000;
+    }
+
+    private boolean canChange() {
+        return System.currentTimeMillis() - lastChange >= 5000;
+    }
+
+    private void applyChange(int newRate) {
+
+        if (newRate == bitrate) return;
+
+        System.out.println();
+        System.out.println("====================================================");
+        System.out.println("      BITRATE CHANGE: " + bitrate + " → " + newRate + " kbps");
+        System.out.println("====================================================");
+        System.out.println();
+
+        bitrate = newRate;
+        lastChange = System.currentTimeMillis();
+        history.add(new BitrateChange(newRate, lastChange));
+
+        // trim 1-minute window
+        long cutoff = lastChange - 60000;
+        while (!history.isEmpty() && history.peek().timestamp < cutoff) {
+            history.poll();
+        }
+
+        streamer.setBitrate(newRate);
+    }
+
+    // ----------------------------------------------------------------------
+    // Rule implementations
+    // ----------------------------------------------------------------------
+
+    // Rule 1: >X% buffering → decrease
+    private boolean Rule1_BufferingTooHigh(int percentBuffering) {
+        if (percentBuffering > 40 && canChange()) {
+            applyChange(Math.max(minBitrate, bitrate - increment));
+            return true;
+        }
+        return false;
+    }
+
+    // Rule 2: <X% buffering for Y cycles → increase
+    private boolean Rule2_BufferingLow(int percentBuffering) {
+        if (percentBuffering == 0) healthyStreak++;
+        else healthyStreak = 0;
+
+        if (healthyStreak >= 3 && canChange()) {
+            healthyStreak = 0;
+            applyChange(Math.min(maxBitrate, bitrate + increment));
+            return true;
+        }
+        return false;
+    }
+
+    // Rule 3: spike after increase → revert
+    private boolean Rule3_RevertIfSpike(int percentBuffering) {
+        if (history.size() < 1) return false;
+
+        BitrateChange last = history.peek();
+        long dt = System.currentTimeMillis() - last.timestamp;
+
+        if (dt < 15000 && percentBuffering > 30) {
+            applyChange(Math.max(minBitrate, bitrate - increment));
+            return true;
+        }
+        return false;
+    }
+
+    // Rule 4: too many changes → freeze
+    private boolean Rule4_TooManyChanges() {
+        if (history.size() >= 4) {
+            long now = System.currentTimeMillis();
+            long first = history.peek().timestamp;
+            if (now - first < 30000) {
+                System.out.println("[EXPERT] Too many changes recently, holding bitrate.");
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Rule 5: low cache → decrease
+    private boolean Rule5_CacheLow(int avgCache) {
+        if (avgCache < 40 && canChange()) {
+            applyChange(Math.max(minBitrate, bitrate - increment));
+            return true;
+        }
+        return false;
+    }
+
+    // Rule 6: high cache → optional slight increase
+    private boolean Rule6_CacheHigh(int avgCache) {
+        if (avgCache > 90 && canChange()) {
+            applyChange(Math.min(maxBitrate, bitrate + increment));
+            return true;
+        }
+        return false;
+    }
+
+    // Rule 7: missing telemetry → precaution decrease
+    private boolean Rule7_MissingTelemetry(int missingPercent) {
+        if (missingPercent > 30 && canChange()) {
+            applyChange(Math.max(minBitrate, bitrate - increment));
+            return true;
+        }
+        return false;
+    }
+
+    // Rule 8: no buffering for Y minutes → record baseline
+    private void Rule8_RecordBaseline(int percentBuffering) {
+        if (percentBuffering == 0) noBufferingStreak++;
+        else noBufferingStreak = 0;
+
+        int cyclesNeeded = (60_000 / iterationMs); // 1 minute
+        if (noBufferingStreak >= cyclesNeeded) {
+            System.out.println("[EXPERT] Baseline stable bitrate: " + bitrate);
+            noBufferingStreak = 0;
+        }
+    }
+
+    // Rule 9: at min bitrate + buffering persists
+    private void Rule9_MinBitrateStillBuffering(int percentBuffering) {
+        if (bitrate == minBitrate && percentBuffering > 50) {
+            System.out.println("[EXPERT] WARNING: minimum bitrate but buffering persists.");
+        }
+    }
+
+    // Rule 10: fully stable for Y minutes
+    private void Rule10_StableSession(int percentBuffering) {
+        int cyclesNeeded = (60_000 / iterationMs);
+        if (percentBuffering == 0) healthyStreak++;
+        else healthyStreak = 0;
+
+        if (healthyStreak >= cyclesNeeded) {
+            System.out.println("[EXPERT] Session is stable at current bitrate.");
+            healthyStreak = 0;
+        }
     }
 }

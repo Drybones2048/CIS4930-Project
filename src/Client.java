@@ -1,54 +1,103 @@
 package src;
 
 public class Client {
-    private String ipAddress; // Client identification
-    public int bufferDuration; // how long client is buffering in seconds or milliseconds, used to read average buffer length
 
-    // This is used as a handshake to check if a client has stalled and not updated
-    // When updating the client information (even if no changes are made), it should be set to true
-    // When ExpertSystem reads the client's information every iteration (i.e., every 5 seconds), it sets it to false
-    // It will know a client has stalled/is not responding if it reads a false isUpdated value.
-    public boolean isUpdated;
+    private final String ipAddress;
 
-    private long lastUpdateMs;// track last update time for timeouts if needed
+    // Telemetry extracted by VlcMonitor
+    private int cachePercent = 100;
+    private boolean isBuffering = false;
+    private int droppedFrames = 0;
+    private int lastDroppedFrames = 0;
 
-    // Constructor
+    private boolean updated = false;
+    private long lastUpdateMs = System.currentTimeMillis();
+
+    // Tracking how long the client has existed
+    private long firstSeen = System.currentTimeMillis();
+
     public Client(String ipAddress) {
         this.ipAddress = ipAddress;
-        this.bufferDuration = 0;
-        this.isUpdated = false;
-        this.lastUpdateMs = 0L;
-    }
-
-    // Called whenever new info comes from the client
-    // bufferDuration is the "how long they are buffering" value
-    public void updateStatus(int bufferDuration) {
-        this.bufferDuration = bufferDuration;
-        this.isUpdated = true;
-        this.lastUpdateMs = System.currentTimeMillis();
-    }
-
-    // Called by ExpertSystem after it reads the client this iteration
-    // so that on the next tick, we can detect if the client failed to update
-    public void resetUpdatedFlag() {
-        this.isUpdated = false;
-    }
-
-    // helper that checks if the client currently buffering
-    public boolean isBuffering() {
-        return bufferDuration > 0;
-    }
-
-    // helper for potential timeout checks, if we eed it
-    public boolean isAlive(long nowMs, long timeoutMs) {
-        return (nowMs - lastUpdateMs) <= timeoutMs;
     }
 
     public String getIpAddress() {
         return ipAddress;
     }
 
+    // ----------------------------------------------------------------------
+    // Telemetry setters
+    // ----------------------------------------------------------------------
+
+    public void setCachePercent(int percent) {
+        this.cachePercent = Math.max(0, Math.min(100, percent));
+    }
+
+    public void setIsBuffering(boolean buffering) {
+        this.isBuffering = buffering;
+    }
+
+    public void setDroppedFrames(int count) {
+        this.lastDroppedFrames = this.droppedFrames;
+        this.droppedFrames = Math.max(0, count);
+    }
+
+    public void markUpdated() {
+        updated = true;
+        lastUpdateMs = System.currentTimeMillis();
+    }
+
+    public void resetUpdatedFlag() {
+        updated = false;
+    }
+
+    // ----------------------------------------------------------------------
+    // Getters
+    // ----------------------------------------------------------------------
+
+    public int getCachePercent() {
+        return cachePercent;
+    }
+
+    public boolean isBuffering() {
+        return isBuffering;
+    }
+
+    public int getDroppedFrames() {
+        return droppedFrames;
+    }
+
+    public int getDroppedDelta() {
+        return Math.max(0, droppedFrames - lastDroppedFrames);
+    }
+
     public long getLastUpdateMs() {
         return lastUpdateMs;
+    }
+
+    // ----------------------------------------------------------------------
+    // Derived health logic
+    // ----------------------------------------------------------------------
+
+    public boolean isHealthy() {
+        // High cache, no buffering, minimal drops
+        return cachePercent >= 80 &&
+                !isBuffering &&
+                getDroppedDelta() == 0;
+    }
+
+    public boolean isStruggling() {
+        // Buffering or low cache or rising drops
+        return isBuffering ||
+                cachePercent <= 40 ||
+                getDroppedDelta() > 3;
+    }
+
+    // ----------------------------------------------------------------------
+    // Grace period for new clients
+    // ----------------------------------------------------------------------
+
+    public boolean inGracePeriod(int graceCycles, int iterationMs) {
+        long msAlive = System.currentTimeMillis() - firstSeen;
+        return msAlive < (long) graceCycles * iterationMs;
     }
 }
